@@ -7,6 +7,8 @@ import multer from "multer";
 import FormData from "form-data";
 import fetch from "node-fetch";
 import fs from "fs";
+import os from "os";
+import path from "path";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -23,6 +25,11 @@ if (!APP_SECRET) {
   console.error("[FATAL] APP_SECRET is not set. Exiting.");
   process.exit(1);
 }
+
+// ─── Temp Directory ───────────────────────────────────────────────────────────
+
+const TEMP_DIR = path.join(os.tmpdir(), "sayitalarm");
+fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 // ─── Express Setup ────────────────────────────────────────────────────────────
 
@@ -71,7 +78,7 @@ const ALLOWED_AUDIO_MIMES = new Set([
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 const upload = multer({
-  dest: "/tmp/sayitalarm/",
+  dest: TEMP_DIR,
   limits: { fileSize: MAX_FILE_SIZE, files: 1 },
   fileFilter(_req, file, cb) {
     if (ALLOWED_AUDIO_MIMES.has(file.mimetype)) {
@@ -129,12 +136,29 @@ app.post(
       const voiceName = rawName.replace(/[^\x20-\x7E]/g, "").trim().slice(0, 100)
         || `SayItAlarm-${Date.now()}`;
 
+      // Normalize MIME type: audio/mp4 is the iOS IANA type for m4a,
+      // but ElevenLabs expects audio/x-m4a with the .m4a extension.
+      const rawMime = file.mimetype || "audio/x-m4a";
+      const normalizedMime = rawMime === "audio/mp4" ? "audio/x-m4a" : rawMime;
+      const extMap = {
+        "audio/mpeg":  "mp3",
+        "audio/mp3":   "mp3",
+        "audio/wav":   "wav",
+        "audio/x-wav": "wav",
+        "audio/x-m4a": "m4a",
+        "audio/aac":   "m4a",
+        "audio/ogg":   "ogg",
+        "audio/webm":  "webm",
+        "audio/flac":  "flac",
+      };
+      const fileExt = extMap[normalizedMime] || "m4a";
+
       const form = new FormData();
       form.append("name", voiceName);
       form.append("description", "SayItAlarm voice clone");
       form.append("files", fs.createReadStream(file.path), {
-        filename: `voice_sample.${file.mimetype?.split("/")[1] || "m4a"}`,
-        contentType: file.mimetype || "audio/x-m4a",
+        filename: `voice_sample.${fileExt}`,
+        contentType: normalizedMime,
       });
 
       const upstream = await fetch("https://api.elevenlabs.io/v1/voices/add", {
@@ -149,7 +173,7 @@ app.post(
       const json = await upstream.json();
 
       if (!upstream.ok) {
-        console.error(`[API] clone-voice upstream error ${upstream.status}`);
+        console.error(`[API] clone-voice upstream error ${upstream.status}:`, JSON.stringify(json));
         // Return a sanitized error — don't expose upstream internals
         const safeMsg = upstream.status === 422
           ? "Invalid audio file. Please use a clear voice recording."
